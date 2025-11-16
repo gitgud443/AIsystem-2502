@@ -2,3 +2,8 @@ fastapi
 pydantic
 uvicorn[standard]
 python-multipart
+opencv-python-headless
+numpy
+insightface==0.7.3
+onnxruntime
+torch
