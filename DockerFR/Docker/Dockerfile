@@ -22,13 +22,13 @@ RUN python -m pip install --upgrade pip setuptools wheel
 COPY requirements.txt .
 
 # Install requirements
-RUN pip install --no-cache-dir numpy==2.0.2
+RUN pip install --no-cache-dir "numpy<2.0,>=1.21.6"
 RUN pip install --no-cache-dir onnxruntime==1.15.1
 RUN pip install --no-cache-dir opencv-python-headless==4.8.1.78
 RUN pip install --no-cache-dir insightface==0.7.3
 RUN pip install --no-cache-dir fastapi==0.104.1
 RUN pip install --no-cache-dir pydantic
-RUN pip install --no-cache-dir uvicorn[standard]==0.24.0
+RUN pip install --no-cache-dir "uvicorn[standard]==0.24.0"
 RUN pip install --no-cache-dir python-multipart==0.0.6
 RUN pip install --no-cache-dir torch
 
