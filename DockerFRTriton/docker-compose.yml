@@ -11,16 +11,13 @@ services:
       tritonserver --model-repository=/models
       --log-verbose=1
       --allow-http=true --allow-grpc=true --allow-metrics=true
-    # Uncomment for GPU support (requires NVIDIA Container Toolkit)
-    # runtime: nvidia
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    
   fastapi:
     build: .
     ports:
@@ -28,6 +25,7 @@ services:
     volumes:
       - .:/app
     depends_on:
-      - triton
+      triton:
+        condition: service_healthy  # Wait for Triton to be healthy
     environment:
       - TRITON_URL=http://triton:8000

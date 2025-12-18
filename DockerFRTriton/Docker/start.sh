@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 TRITON_REPO=${TRITON_REPO:-/app/model_repository}
 TRITON_HTTP_PORT=${TRITON_HTTP_PORT:-8000}
