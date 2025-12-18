@@ -1,8 +1,22 @@
-torch>=2.0
-onnx>=1.14
-tritonclient[http]>=2.41.0
-numpy>=1.24
-Pillow>=10.0
-fastapi>=0.110
-uvicorn[standard]>=0.23
-python-multipart>=0.0.6
+# Core dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Triton client
+tritonclient[http]==2.40.0
+
+# Image processing
+Pillow==10.1.0
+numpy==1.24.3
+
+# ONNX (for model validation during export)
+onnx==1.15.0
+onnxruntime==1.16.3
+
+# InsightFace (only needed for local model extraction, not in Docker)
+# insightface==0.7.3
+
+# Optional: for testing
+# pytest==7.4.3
+# httpx==0.25.2

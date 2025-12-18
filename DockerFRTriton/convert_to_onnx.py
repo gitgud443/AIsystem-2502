@@ -1,104 +1,162 @@
 import argparse
+import shutil
 from pathlib import Path
-
 import onnx
-import torch
-from torch import nn
 
 
-class ToyFRModel(nn.Module):
+def find_insightface_model(model_name: str = "buffalo_l") -> Path:
     """
-    Minimal CPU-friendly face-embedding backbone.
-
-    This is intentionally light-weight so the Triton pipeline works even if
-    students have not yet swapped in a real FR model. Replace with your own
-    architecture when ready.
+    Locate the InsightFace model directory.
+    InsightFace downloads models to ~/.insightface/models/
     """
-
-    def __init__(self, embedding_dim: int = 512) -> None:
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
+    import os
+    
+    # Default InsightFace model directory
+    insightface_root = Path.home() / ".insightface" / "models" / model_name
+    
+    if not insightface_root.exists():
+        raise FileNotFoundError(
+            f"InsightFace model '{model_name}' not found at {insightface_root}.\n"
+            f"Please run your InsightFace code once to download the models, or specify a different path."
         )
-        self.head = nn.Linear(32, embedding_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        x = self.features(x)
-        x = torch.flatten(x, 1)
-        return self.head(x)
+    
+    return insightface_root
 
 
-def _load_state_if_available(model: nn.Module, weights_path: Path) -> None:
-    if not weights_path.exists():
-        print(f"[convert] No weights found at {weights_path}, exporting randomly initialized toy model.")
-        return
+def extract_recognition_model(model_dir: Path, output_path: Path) -> None:
+    """
+    Extract the face recognition (ArcFace) ONNX model from InsightFace buffalo_l.
+    The FR model is typically named 'w600k_r50.onnx' or similar.
+    """
+    # Common FR model names in buffalo_l
+    possible_names = [
+        "w600k_r50.onnx",      # Most common in buffalo_l
+        "w600k_mbf.onnx",       # MobileFaceNet variant
+        "glintr100.onnx",       # R100 variant
+    ]
+    
+    fr_model_path = None
+    for name in possible_names:
+        candidate = model_dir / name
+        if candidate.exists():
+            fr_model_path = candidate
+            print(f"[convert] Found FR model: {name}")
+            break
+    
+    if fr_model_path is None:
+        # List available models to help user
+        available = list(model_dir.glob("*.onnx"))
+        raise FileNotFoundError(
+            f"Could not find FR model in {model_dir}.\n"
+            f"Available ONNX models: {[f.name for f in available]}\n"
+            f"Please check the model directory or specify the correct model name."
+        )
+    
+    # Create output directory
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Copy the ONNX model
+    shutil.copy2(fr_model_path, output_path)
+    
+    # Verify the model
+    try:
+        onnx.checker.check_model(onnx.load(str(output_path)))
+        print(f"[convert] ✓ Successfully extracted FR model to: {output_path}")
+        print(f"[convert] ✓ Model validation passed")
+    except Exception as e:
+        print(f"[convert] ⚠ Warning: Model validation failed: {e}")
+        print(f"[convert] The model was still copied, but may have issues.")
 
-    state = torch.load(weights_path, map_location="cpu")
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
-    if isinstance(state, dict):
-        state = {k.replace("module.", "", 1) if k.startswith("module.") else k: v for k, v in state.items()}
-        missing_unexpected = model.load_state_dict(state, strict=False)
-        if missing_unexpected.missing_keys:
-            print(f"[convert] Missing keys: {missing_unexpected.missing_keys}")
-        if missing_unexpected.unexpected_keys:
-            print(f"[convert] Unexpected keys: {missing_unexpected.unexpected_keys}")
+
+def print_model_info(model_path: Path) -> None:
+    """Print basic information about the ONNX model."""
+    try:
+        model = onnx.load(str(model_path))
+        
+        print("\n" + "="*60)
+        print("MODEL INFORMATION")
+        print("="*60)
+        
+        # Input info
+        print("\nInputs:")
+        for input_tensor in model.graph.input:
+            dims = [d.dim_value if d.dim_value > 0 else "dynamic" for d in input_tensor.type.tensor_type.shape.dim]
+            print(f"  - {input_tensor.name}: {dims}")
+        
+        # Output info
+        print("\nOutputs:")
+        for output_tensor in model.graph.output:
+            dims = [d.dim_value if d.dim_value > 0 else "dynamic" for d in output_tensor.type.tensor_type.shape.dim]
+            print(f"  - {output_tensor.name}: {dims}")
+        
+        print("="*60 + "\n")
+        
+    except Exception as e:
+        print(f"Could not read model info: {e}")
+
+
+def convert_model_to_onnx(
+    insightface_model_name: str,
+    onnx_path: Path,
+    custom_model_dir: Path = None
+) -> None:
+    """
+    Extract the InsightFace FR model (ArcFace backbone) to ONNX for Triton.
+    
+    Args:
+        insightface_model_name: Name of InsightFace model pack (e.g., 'buffalo_l')
+        onnx_path: Destination path for the ONNX model
+        custom_model_dir: Optional custom directory containing InsightFace models
+    """
+    print(f"[convert] Extracting InsightFace model: {insightface_model_name}")
+    
+    # Find the InsightFace model directory
+    if custom_model_dir and custom_model_dir.exists():
+        model_dir = custom_model_dir
+        print(f"[convert] Using custom model directory: {model_dir}")
     else:
-        model.load_state_dict(state)
-    print(f"[convert] Loaded weights from {weights_path}")
-
-
-def convert_model_to_onnx(weights_path: Path, onnx_path: Path, opset: int) -> None:
-    """
-    Convert a (placeholder) FR model to ONNX for Triton CPU serving.
-
-    Swap out `ToyFRModel` with your actual FR backbone once ready; the rest of
-    the export pipeline stays the same.
-    """
-    model = ToyFRModel()
-    _load_state_if_available(model, weights_path)
-    model.eval()
-
-    onnx_path.parent.mkdir(parents=True, exist_ok=True)
-    dummy_input = torch.randn(1, 3, 112, 112)
-    dynamic_axes = {"input": {0: "batch"}, "embedding": {0: "batch"}}
-
-    torch.onnx.export(
-        model,
-        dummy_input,
-        onnx_path,
-        input_names=["input"],
-        output_names=["embedding"],
-        dynamic_axes=dynamic_axes,
-        opset_version=opset,
-        do_constant_folding=True,
-    )
-    onnx.checker.check_model(onnx.load(str(onnx_path)))
-    print(f"[convert] ONNX export complete: {onnx_path}")
+        model_dir = find_insightface_model(insightface_model_name)
+        print(f"[convert] Found InsightFace models at: {model_dir}")
+    
+    # Extract the recognition model
+    extract_recognition_model(model_dir, onnx_path)
+    
+    # Print model information
+    print_model_info(onnx_path)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert FR model to ONNX for Triton.")
-    parser.add_argument("--weights-path", type=Path, required=True, help="Path to FR model weights (.pth).")
+    parser = argparse.ArgumentParser(
+        description="Extract InsightFace FR model to ONNX for Triton."
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default="buffalo_l",
+        help="InsightFace model pack name (default: buffalo_l)",
+    )
     parser.add_argument(
         "--onnx-path",
         type=Path,
         default=Path("model_repository/fr_model/1/model.onnx"),
         help="Destination for exported ONNX file.",
     )
-    parser.add_argument("--opset", type=int, default=12, help="ONNX opset version.")
+    parser.add_argument(
+        "--model-dir",
+        type=Path,
+        default=None,
+        help="Custom directory containing InsightFace models (optional)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    convert_model_to_onnx(args.weights_path, args.onnx_path, args.opset)
+    convert_model_to_onnx(
+        args.model_name,
+        args.onnx_path,
+        args.model_dir
+    )
 
 
 if __name__ == "__main__":
