@@ -6,10 +6,7 @@ from typing import List, Dict, Any
 
 from triton_service import (
     prepare_model_repository,
-    start_triton_server,
-    stop_triton_server,
     create_triton_client,
-    TRITON_HTTP_PORT,
 )
 from pipeline import (
     calculate_face_similarity,
@@ -19,58 +16,35 @@ from pipeline import (
 )
 
 
-# Global variables
-triton_server = None
-triton_client = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup and shutdown events."""
-    global triton_server, triton_client
-    
-    # Startup
-    print("="*60)
-    print("APPLICATION STARTUP")
-    print("="*60)
-    
-    try:
-        # Setup model repository
-        model_repo = Path("model_repository")
-        print(f"[startup] Preparing model repository at {model_repo}")
-        prepare_model_repository(model_repo)
-        
-        # Start Triton server
-        print("[startup] Starting Triton Inference Server...")
-        triton_server = start_triton_server(model_repo)
-        
-        # Create Triton client
-        print("[startup] Creating Triton client...")
-        triton_client = create_triton_client(f"localhost:{TRITON_HTTP_PORT}")
-        
-        print("✓ Triton server and client initialized successfully!")
-        print(f"✓ Server running on port {TRITON_HTTP_PORT}")
-        print("="*60)
-        
-    except Exception as e:
-        print(f"✗ FATAL ERROR during initialization: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-    
+    # Prepare model repository (generates config.pbtxt files for both models)
+    model_repo = Path("model_repository")
+    prepare_model_repository(model_repo)
+    print("[startup] Model repository prepared")
+
+    # Create Triton client and wait for server to be ready
+    global triton_client
+    triton_client = create_triton_client(url="triton:8000")  # Docker service name
+
+    import time
+    max_attempts = 30
+    for i in range(max_attempts):
+        if triton_client.is_server_live():
+            print("[startup] Connected to Triton server!")
+            break
+        print(f"[startup] Waiting for Triton... ({i+1}/{max_attempts})")
+        time.sleep(2)
+    else:
+        raise RuntimeError("Failed to connect to Triton server")
+
     yield  # Application runs here
-    
-    # Shutdown
-    print("="*60)
-    print("APPLICATION SHUTDOWN")
-    print("="*60)
-    
-    if triton_server is not None:
-        stop_triton_server(triton_server)
-    
-    triton_client = None
-    print("✓ Shutdown complete")
-    print("="*60)
+
+    # Optional cleanup
+    if triton_client:
+        triton_client.close()
+
+app = FastAPI(lifespan=lifespan)
 
 
 app = FastAPI(

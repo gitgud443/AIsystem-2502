@@ -9,9 +9,6 @@ def find_insightface_model(model_name: str = "buffalo_l") -> Path:
     Locate the InsightFace model directory.
     InsightFace downloads models to ~/.insightface/models/
     """
-    import os
-    
-    # Default InsightFace model directory
     insightface_root = Path.home() / ".insightface" / "models" / model_name
     
     if not insightface_root.exists():
@@ -21,6 +18,41 @@ def find_insightface_model(model_name: str = "buffalo_l") -> Path:
         )
     
     return insightface_root
+
+
+def make_output_dynamic(model_path: Path) -> None:
+    """
+    Make the output batch dimension dynamic for Triton compatibility.
+    
+    InsightFace models often have fixed output shapes like [1, 512].
+    Triton requires dynamic batch dimensions [-1, 512] for batching support.
+    """
+    model = onnx.load(str(model_path))
+    
+    modified = False
+    for output in model.graph.output:
+        # Get the first dimension (batch dimension)
+        if len(output.type.tensor_type.shape.dim) > 0:
+            first_dim = output.type.tensor_type.shape.dim[0]
+            
+            # Check if it's a fixed dimension
+            if first_dim.HasField('dim_value') and first_dim.dim_value == 1:
+                print(f"[convert] Output '{output.name}' has fixed batch size: {first_dim.dim_value}")
+                print(f"[convert] Changing to dynamic batch dimension...")
+                
+                # Clear the fixed value and set dynamic parameter
+                first_dim.Clear()
+                first_dim.dim_param = "batch"
+                
+                modified = True
+                print(f"[convert] ✓ Output '{output.name}' now has dynamic batch dimension")
+    
+    if modified:
+        # Save the modified model
+        onnx.save(model, str(model_path))
+        print(f"[convert] ✓ Saved model with dynamic output dimensions")
+    else:
+        print(f"[convert] Output already has dynamic batch dimension (no changes needed)")
 
 
 def extract_recognition_model(model_dir: Path, output_path: Path) -> None:
@@ -58,6 +90,10 @@ def extract_recognition_model(model_dir: Path, output_path: Path) -> None:
     # Copy the ONNX model
     shutil.copy2(fr_model_path, output_path)
     
+    # Make output batch dimension dynamic for Triton compatibility
+    print(f"[convert] Making output batch dimension dynamic...")
+    make_output_dynamic(output_path)
+    
     # Verify the model
     try:
         onnx.checker.check_model(onnx.load(str(output_path)))
@@ -80,13 +116,15 @@ def print_model_info(model_path: Path) -> None:
         # Input info
         print("\nInputs:")
         for input_tensor in model.graph.input:
-            dims = [d.dim_value if d.dim_value > 0 else "dynamic" for d in input_tensor.type.tensor_type.shape.dim]
+            dims = [d.dim_value if d.dim_value > 0 else d.dim_param if d.dim_param else "dynamic" 
+                   for d in input_tensor.type.tensor_type.shape.dim]
             print(f"  - {input_tensor.name}: {dims}")
         
         # Output info
         print("\nOutputs:")
         for output_tensor in model.graph.output:
-            dims = [d.dim_value if d.dim_value > 0 else "dynamic" for d in output_tensor.type.tensor_type.shape.dim]
+            dims = [d.dim_value if d.dim_value > 0 else d.dim_param if d.dim_param else "dynamic" 
+                   for d in output_tensor.type.tensor_type.shape.dim]
             print(f"  - {output_tensor.name}: {dims}")
         
         print("="*60 + "\n")
