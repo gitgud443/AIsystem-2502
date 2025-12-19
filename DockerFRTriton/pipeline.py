@@ -73,6 +73,20 @@ def postprocess_scrfd(raw_outputs: Dict[str, np.ndarray], img_shape: Tuple[int, 
         
         for i in range(len(score)):
             x1, y1, x2, y2 = bbox[i]
+            # Fix inverted coordinates
+            x1, x2 = sorted([x1, x2])
+            y1, y2 = sorted([y1, y2])
+            
+            # Final clamp
+            x1 = max(0.0, x1)
+            y1 = max(0.0, y1)
+            x2 = min(float(w), x2)
+            y2 = min(float(h), y2)
+            
+            # Skip if box has zero or negative area
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
             detections.append({
                 'bbox': [float(x1), float(y1), float(x2), float(y2)],
                 'score': float(score[i])
