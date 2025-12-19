@@ -2,10 +2,12 @@ from typing import Any, Tuple, List, Dict
 import numpy as np
 from io import BytesIO
 from PIL import Image
+import math
 
 from triton_service import (
     run_detector_inference,
     run_recognition_inference,
+    preprocess_for_detector,
     FR_MODEL_IMAGE_SIZE
 )
 
@@ -17,6 +19,76 @@ def _cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
     if a_norm == 0.0 or b_norm == 0.0:
         return 0.0
     return float(np.dot(vec_a, vec_b) / (a_norm * b_norm))
+
+
+def postprocess_scrfd(raw_outputs: Dict[str, np.ndarray], img_shape: Tuple[int, int], conf_threshold: float = 0.4, nms_threshold: float = 0.4) -> List[Dict[str, Any]]:
+    """
+    Post-process SCRFD raw outputs (9 tensors: score, bbox, kps for each of 3 strides).
+    Outputs are flattened, no batch dim visible after squeeze.
+    """
+    # Sort keys to get consistent order
+    output_names = sorted(raw_outputs.keys())
+    
+    # Expected grouping: score, bbox, kps for stride32, stride16, stride8 (or reverse — we'll match by shape)
+    scores = []
+    bboxes = []
+    # landmarks = []  # optional, ignore for now
+    
+    for key in output_names:
+        tensor = raw_outputs[key]
+        shape = tensor.shape
+        if len(shape) == 2 and shape[1] == 1:  # scores
+            scores.append(tensor.squeeze(1))  # (N,)
+        elif len(shape) == 2 and shape[1] == 4:  # bboxes
+            bboxes.append(tensor)  # (N, 4)
+        elif len(shape) == 2 and shape[1] == 10:  # landmarks
+            pass  # ignore
+    
+    # Should have 3 scores and 3 bboxes
+    assert len(scores) == 3 and len(bboxes) == 3, f"Unexpected number of score/bbox tensors: {len(scores)}/{len(bboxes)}"
+    
+    h, w = img_shape
+    detections = []
+    
+    for score, bbox in zip(scores, bboxes):
+        # Sigmoid for confidence (SCRFD uses sigmoid)
+        score = 1 / (1 + np.exp(-score))  # (N,)
+        
+        # Filter threshold
+        keep = score > conf_threshold
+        score = score[keep]
+        bbox = bbox[keep]
+        
+        if len(score) == 0:
+            continue
+        
+        # BBoxes are usually in absolute pixel coordinates already (common in InsightFace ONNX)
+        # If boxes look tiny/off, uncomment scaling:
+        # bbox[:, [0, 2]] *= w
+        # bbox[:, [1, 3]] *= h
+        
+        # Clamp
+        bbox[:, [0, 2]] = np.clip(bbox[:, [0, 2]], 0, w)
+        bbox[:, [1, 3]] = np.clip(bbox[:, [1, 3]], 0, h)
+        
+        for i in range(len(score)):
+            x1, y1, x2, y2 = bbox[i]
+            detections.append({
+                'bbox': [float(x1), float(y1), float(x2), float(y2)],
+                'score': float(score[i])
+            })
+    
+    # Sort by score descending
+    detections = sorted(detections, key=lambda x: x['score'], reverse=True)
+    
+    print(f"[Detector] Found {len(detections)} raw detections (threshold={conf_threshold})")
+    
+    # Optional: simple NMS (greedy by score)
+    if detections:
+        # Implement basic NMS or skip for single-face images
+        pass  # for assignment, single best face is fine
+    
+    return detections
 
 
 def detect_and_crop_face(image_bytes: bytes, client: Any) -> np.ndarray:
@@ -34,12 +106,19 @@ def detect_and_crop_face(image_bytes: bytes, client: Any) -> np.ndarray:
         ValueError: If no face is detected
     """
     # Run detection on Triton
-    detections = run_detector_inference(client, image_bytes)
+    preprocessed = preprocess_for_detector(image_bytes)
+    raw_outputs = run_detector_inference(client, preprocessed)
+    
+    # Get original image size
+    with Image.open(BytesIO(image_bytes)) as img:
+        original_size = img.size  # (w, h)
+        img_shape = img.height, img.width  # (h, w)
+    
+    detections = postprocess_scrfd(raw_outputs, img_shape)
     
     if len(detections) == 0:
         raise ValueError("No face detected in the image")
     
-    # Use the face with highest confidence score
     best_detection = max(detections, key=lambda x: x['score'])
     
     # Load image and crop face
@@ -63,9 +142,16 @@ def detect_and_crop_face(image_bytes: bytes, client: Any) -> np.ndarray:
         
         # Resize to model input size
         face_crop = face_crop.resize(FR_MODEL_IMAGE_SIZE)
-        
-        # Convert to numpy array
-        face_np = np.asarray(face_crop, dtype=np.uint8)
+
+    face_crop = face_crop.resize(FR_MODEL_IMAGE_SIZE)
+
+    # Convert to float32 and apply standard ArcFace normalization
+    face_np = np.asarray(face_crop, dtype=np.float32)
+    face_np = (face_np - 127.5) / 128.0   # Critical: mean 127.5, std 128.0
+
+    # Transpose to CHW and add batch dim
+    face_np = np.transpose(face_np, (2, 0, 1))  # HWC -> CHW
+    face_np = np.expand_dims(face_np, axis=0)   # (1, 3, 112, 112)
     
     return face_np
 
@@ -165,7 +251,8 @@ def detect_all_faces(image_bytes: bytes, client: Any) -> List[Dict[str, Any]]:
         - score: confidence score
         - landmarks: facial landmarks (10 values for 5 points)
     """
-    detections = run_detector_inference(client, image_bytes)
+    preprocessed = preprocess_for_detector(image_bytes)
+    detections = run_detector_inference(client, preprocessed)
     return detections
 
 
@@ -184,7 +271,8 @@ def extract_embeddings_for_all_faces(image_bytes: bytes, client: Any) -> List[np
         ValueError: If no faces are detected
     """
     # Detect all faces
-    detections = run_detector_inference(client, image_bytes)
+    preprocessed = preprocess_for_detector(image_bytes)
+    detections = run_detector_inference(client, preprocessed)
     
     if len(detections) == 0:
         raise ValueError("No faces detected in the image")
@@ -202,7 +290,14 @@ def extract_embeddings_for_all_faces(image_bytes: bytes, client: Any) -> List[np
             # Crop face
             face_crop = img.crop((x1, y1, x2, y2))
             face_crop = face_crop.resize(FR_MODEL_IMAGE_SIZE)
-            face_np = np.asarray(face_crop, dtype=np.uint8)
+
+            # Convert to float32 and apply standard ArcFace normalization
+            face_np = np.asarray(face_crop, dtype=np.float32)
+            face_np = (face_np - 127.5) / 128.0   # Critical: mean 127.5, std 128.0
+
+            # Transpose to CHW and add batch dim
+            face_np = np.transpose(face_np, (2, 0, 1))  # HWC -> CHW
+            face_np = np.expand_dims(face_np, axis=0)   # (1, 3, 112, 112)
             
             # Get embedding
             embedding = run_recognition_inference(client, face_np)

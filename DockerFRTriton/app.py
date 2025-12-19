@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
 
     # Create Triton client and wait for server to be ready
     global triton_client
-    triton_client = create_triton_client(url="triton:8000")  # Docker service name
+    triton_client = create_triton_client(url="localhost:8000")  # Docker service name
 
     import time
     max_attempts = 30
